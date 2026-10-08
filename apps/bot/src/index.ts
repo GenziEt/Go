@@ -14,6 +14,8 @@ import { telegramAuth, adminAuth, moderatorSessionAuth, createModeratorSession, 
 import { validateTelegramInitData } from "./telegram-webapp.js";
 import { performModerationAction, type AdminDecision } from "./admin-actions.js";
 import { publishToChannel, publishConfession, deleteChannelMessage } from "./telegram-publisher.js";
+import { parsePlatformLink, attachChannelButtons } from "./post-buttons.js";
+import { moderateText } from "./moderation.js";
 import { rateLimit, moderateRequestText, collectTextValues, enforceContentModeration } from "./safety.js";
 import { randomBytes } from "node:crypto";
 import { logger } from "./logger.js";
@@ -772,6 +774,20 @@ app.get("/api/posts", async (req: Request, res: Response) => {
   const viewer = await resolveOptionalViewer(req);
   const { posts, total } = await listPublishedPosts(where, viewer, page, limit);
   res.json({ success: true, data: { items: posts, page, limit, total, hasMore: page * limit < total }, error: null, timestamp: new Date().toISOString() });
+});
+
+// Slug lookup used by the Mini App deep link (?startapp=post_<slug>) coming from the
+// channel's "Read More" button. Registered BEFORE /api/posts/:id so "slug" is not treated
+// as an id; gated exactly like the id route (published + quarantine visibility rules).
+app.get("/api/posts/slug/:slug", async (req: Request, res: Response) => {
+  const post = await db.post.findUnique({ where: { slug: String(req.params.slug) } });
+  if (!post || !post.publishedAt) return res.status(404).json({ success: false, data: null, error: "Post not found", timestamp: new Date().toISOString() });
+  const viewer = await resolveOptionalViewer(req);
+  if (post.visibility === "QUARANTINED" && !(viewer && (viewer.id === post.authorId || STAFF_ROLES.includes(viewer.role)))) {
+    return res.status(404).json({ success: false, data: null, error: "Post not found", timestamp: new Date().toISOString() });
+  }
+  const [decorated] = await decoratePostsForViewer([post], viewer);
+  res.json({ success: true, data: decorated, error: null, timestamp: new Date().toISOString() });
 });
 
 app.get("/api/posts/:id", async (req: Request, res: Response) => {
@@ -2041,6 +2057,22 @@ app.post("/api/posts", telegramAuth, async (req: Request, res: Response) => {
     communityId = member.communityId;
   }
   if (!title || !body) return res.status(400).json({ success: false, data: null, error: "ርዕስ እና ይዘት ያስፈልጋል።", timestamp: new Date().toISOString() });
+  // Optional link button: only the six official platforms are accepted (same strict allowlist
+  // as the wizard's Link step), and the raw URL string goes through normal text moderation so
+  // scam keywords embedded inside a URL are caught before it ever becomes a channel button.
+  let linkUrl: string | null = null;
+  let linkPlatform: string | null = null;
+  const linkRaw = typeof req.body?.linkUrl === "string" ? req.body.linkUrl.trim() : "";
+  if (linkRaw) {
+    const parsed = parsePlatformLink(linkRaw);
+    if (!parsed) return res.status(400).json({ success: false, data: null, error: "ይህ አገናኝ ተቀባይነት የለውም። የዩቱብ፣ ቲክቶክ፣ ንስታግራም፣ ኤክስ፣ ፌስቡክ ወይም ሊንክድኢን አገናኝ ብቻ።", timestamp: new Date().toISOString() });
+    const urlCheck = moderateText(parsed.url, { isAdmin: STAFF_ROLES.includes(user.role), isForwarded: false });
+    if (urlCheck.decision === "BAN" || urlCheck.decision === "REJECT") {
+      return res.status(400).json({ success: false, data: null, error: "አገናኙ በማረጋገጫ ሰውነት ተከልክሏል።", timestamp: new Date().toISOString() });
+    }
+    linkUrl = parsed.url;
+    linkPlatform = parsed.platform;
+  }
   const safety = await enforceContentModeration(user.id, STAFF_ROLES.includes(user.role), [title, body, ...tags]);
   if (!safety.ok) return res.status(safety.status).json({ success: false, data: null, error: safety.error, timestamp: new Date().toISOString() });
   const quarantineInfo = safety.ok === true && "quarantined" in safety ? { category: safety.category, reason: safety.reason } : { category: "NONE", reason: "" };
@@ -2057,6 +2089,7 @@ app.post("/api/posts", telegramAuth, async (req: Request, res: Response) => {
       ...(mediaType && mediaFileId ? { mediaType, mediaFileId } : {}),
       ...(location ? { location } : {}),
       ...(communityId ? { communityId } : {}),
+      ...(linkUrl && linkPlatform ? { linkUrl, linkPlatform } : {}),
       monetizationType, priceCoins: monetizationType === "PAID" ? priceCoins : 0
     }
   });
@@ -2066,7 +2099,7 @@ app.post("/api/posts", telegramAuth, async (req: Request, res: Response) => {
     const normalized = {
       title, body, tags, category,
       media: { type: mediaType ?? undefined, fileId: mediaFileId ?? undefined },
-      metadata: { slug: post.slug, location: location || undefined, excerpt, readingMinutes }
+      metadata: { slug: post.slug, location: location || undefined, excerpt, readingMinutes, linkPlatform: linkPlatform ?? undefined }
     };
     await db.submission.create({
       data: {
@@ -2074,6 +2107,7 @@ app.post("/api/posts", telegramAuth, async (req: Request, res: Response) => {
         state: "QUARANTINED", title, body, category, tagsJson: JSON.stringify(tags),
         ...(mediaType ? { mediaType } : {}), ...(mediaFileId ? { mediaFileId } : {}),
         ...(location ? { location } : {}),
+        ...(linkUrl ? { linkUrl } : {}), ...(linkPlatform ? { linkPlatform } : {}),
         normalizedJson: JSON.stringify(normalized),
         moderationJson: JSON.stringify(quarantineInfo),
         userId: user.id
@@ -2088,12 +2122,17 @@ app.post("/api/posts", telegramAuth, async (req: Request, res: Response) => {
   let telegramChatId: string | null = null;
   try {
     const publication = await publishToChannel(bot, {
-      title, body, tags, author: user.firstName ?? "GENZI",
+      title, body, tags, author: user.firstName ?? "GENZI", readingMinutes,
       ...(mediaType && mediaFileId ? { mediaType, mediaFileId } : {}),
       ...(location ? { location } : {})
     });
     telegramMessageId = publication.messageId; telegramChatId = publication.chatId;
     await db.post.update({ where: { id: post.id }, data: { telegramMessageId, telegramChatId } });
+    // Buttons land after publish so Share can point at the real message link. Best-effort.
+    await attachChannelButtons(bot, publication.chatId, publication.messageId, {
+      slug: post.slug, messageId: publication.messageId, chatId: publication.chatId,
+      linkUrl, linkPlatform, locale: user.locale === "AMHARIC" ? "am" : "en"
+    });
   } catch (error) { logger.warn("channel publish failed for API post", { postId: post.id, error: String(error) }); }
   await awardXp(user.id, "CREATE_POST");
   await earnCoins(user.id, "POST_PUBLISHED");

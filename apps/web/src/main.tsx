@@ -6,7 +6,11 @@ import "./styles.css";
 import { initTelegramChrome, setBackHook, haptic } from "./telegram.js";
 import { useMainButton, ConfirmSheet } from "./native-ui.js";
 
-type Post={id:string;title:string;body:string;category:string;tagsJson:string;authorName:string;publishedAt:string|null;mediaFileId:string|null;mediaType:string|null;readingMinutes:number;authorId:string;monetizationType?:string;priceCoins?:number;purchased?:boolean};
+type Post={id:string;title:string;body:string;category:string;tagsJson:string;authorName:string;publishedAt:string|null;mediaFileId:string|null;mediaType:string|null;readingMinutes:number;authorId:string;monetizationType?:string;priceCoins?:number;purchased?:boolean;slug?:string;linkUrl?:string|null;linkPlatform?:string|null};
+// Platform emoji for the stored link button (mirrors post-buttons.ts PLATFORM_EMOJI so the
+// Mini App card shows the same visual anchor as the channel's ▶️ Watch on <Platform> button).
+const LINK_PLATFORM_EMOJI:Record<string,string>={youtube:"▶️",tiktok:"🎵",instagram:"📸",x:"✖️",facebook:"📘",linkedin:"💼"};
+const LINK_PLATFORM_NAME:Record<string,string>={youtube:"YouTube",tiktok:"TikTok",instagram:"Instagram",x:"X",facebook:"Facebook",linkedin:"LinkedIn"};
 type Counts={LIKE:number;FIRE:number;LOVE:number};
 type Comment={id:string;body:string;createdAt:string;user:{firstName:string|null;username:string|null}};
 type Profile={id:string;firstName:string|null;lastName:string|null;username:string|null;bio:string|null;role:string;createdAt:string;following?:boolean;avatarFileId?:string|null;locale?:string;_count?:{followers:number;posts:number}};
@@ -151,6 +155,20 @@ function App(){
 
  // Bot deep-links open the app on a specific tab (e.g. https://.../#trending from 🔥/🚀 digests).
  React.useEffect(()=>{const valid:Tab[]=["home","following","trending","saved","notifications","profile","creator","communities","opportunities","events","gamification","monetization","growth","messages","confessions","ask","people"];const initial=location.hash.replace(/^#\/?/,"") as Tab;if(valid.includes(initial))navigate(initial);const onHash=()=>{const h=location.hash.replace(/^#\/?/,"") as Tab;if(valid.includes(h))navigate(h)};window.addEventListener("hashchange",onHash);return()=>window.removeEventListener("hashchange",onHash)},[]);
+ // Channel "📖 Read More" buttons deep-link with ?startapp=post_<slug> (Telegram also exposes
+ // it as initDataUnsafe.start_param). Resolve the slug via /api/posts/slug/:slug, inject the
+ // post at the top of the home feed and scroll it into view — the reader lands on that exact post.
+ const[deepLinkPost,setDeepLinkPost]=React.useState<Post|null>(null);
+ React.useEffect(()=>{
+  const startParam=new URLSearchParams(location.search).get("startapp")??window.Telegram?.WebApp?.initDataUnsafe?.start_param??"";
+  if(!startParam.startsWith("post_"))return;
+  const slug=startParam.slice(5);
+  if(!slug)return;
+  void api(`/api/posts/slug/${encodeURIComponent(slug)}`).then(r=>r.ok?r.json():null).then(x=>{
+   if(x?.data?.id){setDeepLinkPost(x.data as Post);setTimeout(()=>document.getElementById(`post-${x.data.id}`)?.scrollIntoView({behavior:"smooth",block:"start"}),300)}
+   else pushToast("ልጥፉ አልተገኘም · Post not found");
+  }).catch(()=>undefined);
+ },[]);
  const mode=tab==="following"?"following":tab==="trending"?"trending":"for-you";
  const load=React.useCallback(async(reset=true)=>{setLoading(true);try{if(tab==="saved"){const r=await api("/api/me/bookmarks");const x=await r.json();setPosts(Array.isArray(x.data)?x.data:[]);setHasMore(false);return}const next=reset?1:page+1;let url=tab==="home"?`/api/posts?q=${encodeURIComponent(q)}&category=${encodeURIComponent(category)}&page=${next}&limit=20`:`/api/me/feed?mode=${mode}&page=${next}&limit=20`;const r=await api(url);const x=await r.json();const items=x?.data?.items??[];setPosts(v=>reset?items:[...v,...items]);setPage(next);setHasMore(!!x?.data?.hasMore)}finally{setLoading(false)}},[q,category,tab,mode,page]);
  React.useEffect(()=>{if(tab!=="profile"&&tab!=="notifications"&&tab!=="creator"&&tab!=="confessions"&&tab!=="ask"&&tab!=="people"&&!authorId)void load(true)},[tab,category,authorId]);

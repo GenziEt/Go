@@ -5,6 +5,7 @@ import { t, type Locale } from "./i18n.js";
 import { moderateAndEnforce } from "./safety.js";
 import { getSession, setConfessionSession, clearSession, fromPrismaLocale, abandonOpenWork } from "./session-store.js";
 import { publishConfession, deleteChannelMessage } from "./telegram-publisher.js";
+import { addDiscussRow } from "./post-buttons.js";
 import { getUser } from "./post-flow.js";
 import { logger } from "./logger.js";
 
@@ -46,7 +47,8 @@ export function confessionKeyboard(confessionId: string, counts: Record<string, 
 }
 
 // Re-draws the vote counts on the channel message (used when a vote arrives through the API,
-// which previously left the channel buttons stale).
+// which previously left the channel buttons stale). The 💬 Discuss URL row is re-applied so
+// refreshes never strip the community button from a published confession.
 export async function refreshConfessionKeyboard(bot: Bot, confessionId: string): Promise<void> {
   const row = await db.confession.findUnique({
     where: { id: confessionId },
@@ -55,7 +57,7 @@ export async function refreshConfessionKeyboard(bot: Bot, confessionId: string):
   if (!row || row.state !== "PUBLISHED" || !row.telegramChatId || row.telegramMessageId === null) return;
   try {
     await bot.api.editMessageReplyMarkup(row.telegramChatId, row.telegramMessageId, {
-      reply_markup: confessionKeyboard(confessionId, await reactionCounts(confessionId)),
+      reply_markup: addDiscussRow(confessionKeyboard(confessionId, await reactionCounts(confessionId))),
     });
   } catch {
     /* markup unchanged or message gone — non-fatal */
@@ -111,7 +113,8 @@ export async function publishConfessionNow(
       bot,
       confession.body ?? "",
       claimed.number,
-      confessionKeyboard(confession.id, await reactionCounts(confession.id))
+      // Reaction callbacks + the URL-type 💬 Discuss row (skipped silently when unconfigured).
+      addDiscussRow(confessionKeyboard(confession.id, await reactionCounts(confession.id)))
     );
   } catch (error) {
     await db.confession.updateMany({ where: { id: confessionId, state: "PUBLISHING" }, data: { state: claimed.previous, number: null } });
