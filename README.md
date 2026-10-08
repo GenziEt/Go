@@ -56,6 +56,18 @@ npm run dev
 
 For the Mini App, set `WEBAPP_URL` to the deployed HTTPS URL. During local development the bot works without the Mini App URL.
 
+### Channel post buttons (v0.3.7)
+
+Every published GENZI channel post carries URL-type inline buttons: ▶️ Watch on <Platform> (only when the author supplied an official YouTube/TikTok/Instagram/X/Facebook/LinkedIn link in the wizard's Link step), 📖 Read More (deep-links into the Mini App at that exact post), 🔗 Share (opens Telegram's native share sheet) and 💬 Discuss (the GENZI discussion group). Buttons degrade gracefully — each row is skipped silently if its variable is unset:
+
+| Variable | Purpose | If missing |
+| --- | --- | --- |
+| `TELEGRAM_BOT_USERNAME` | Bot handle used to build the Mini App deep link (`https://t.me/<bot>/genzi?startapp=post_<slug>`) behind 📖 Read More | Read More button is skipped (a warning is logged) |
+| `GENZI_CHANNEL_USERNAME` | Public channel handle (without `@`) used to build the `https://t.me/share/url?...` link behind 🔗 Share | Share button is skipped |
+| `GENZI_DISCUSSION_URL` | Full `t.me/...` invite link of the GENZI discussion group behind 💬 Discuss | Discuss button is skipped |
+
+The Share button is attached right after publishing (via edit reply-markup) so it can reference the real channel message id; long multi-message posts carry the keyboard on the first message only. The private preview shown before "Approve & Publish" renders the identical caption (including the 👤 Author · 📅 date footer) and buttons, so what the author sees is exactly what goes live.
+
 ## Important
 Telegram bots cannot create a Telegram channel/group for you. Create the GENZI channel/group manually in Telegram, add the bot with the required administrator permissions, and configure the IDs in `.env`.
 

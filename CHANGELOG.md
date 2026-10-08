@@ -1,3 +1,12 @@
+## 0.3.7 — Premium channel posts: Link step, inline buttons & dated footers
+
+- Post wizard gains an optional 4th step "Link" (media → link → category): authors can paste an official YouTube/TikTok/Instagram/X/Facebook/LinkedIn post link (/skip allowed). Only those six platforms are accepted; anything else gets a bilingual (Amharic + English) error. The raw URL also passes normal text moderation so scam keywords inside links are caught. Link + platform are stored on the Submission and the published Post.
+- Every published channel post now carries URL-type inline buttons (never callbacks — no spinning loaders): Row 1 ▶️ Watch on <Platform> (hero, only with a link), Row 2 📖 Read More · 🔗 Share (constant), Row 3 💬 Discuss. Max two buttons per row, emoji-prefixed, predictable positions; rows degrade gracefully when TELEGRAM_BOT_USERNAME / GENZI_CHANNEL_USERNAME / GENZI_DISCUSSION_URL are unset.
+- Footer upgraded from "👤 Author / 📚 1 min read" to "👤 Author · 📅 8 Oct 2026" plus reading time, with clean whitespace between title, body and footer. Identical in the private preview and the live channel post (WYSIWYG); Edit Preview clears any previously set link (no stale links).
+- Share opens Telegram's native share sheet (t.me/share/url pre-filled with 🇪🇹 GENZI) and is attached via edit reply-markup after publish so it can reference the real message id; long multi-message posts get the keyboard on the first message only.
+- Mini App: 📖 Read More deep-links with ?startapp=post_<slug>; the app resolves the slug (new GET /api/posts/slug/:slug), injects the post at the top of the home feed and scrolls to it; posts with a link render a blue full-width "▶️ Watch on <Platform>" hero button on the card. Confessions and moderator-approved publishes reuse the same caption/buttons pipeline.
+- New env vars: GENZI_CHANNEL_USERNAME (channel handle for share links), GENZI_DISCUSSION_URL (discussion group invite link). Both optional — missing values simply skip the corresponding button.
+
 ## 0.3.6 — Post & confession workflow audit
 
 - Moderation: `cp` no longer bans on "epic party"/"public park" (whole-word matching); link allow-list works for https:// URLs; t.me links need ALLOWED_TELEGRAM_HANDLES; URL shorteners removed; "bomb"/"hatred"/"ማስመሰል" false positives fixed.

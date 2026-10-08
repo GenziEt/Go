@@ -39,6 +39,9 @@ header button { border: 1px solid #33405f; background: #151c31; color: #fff; bor
 .media { aspect-ratio: 16 / 9; display: grid; place-items: center; background: #202a40; border-radius: 12px; margin: -2px -2px 14px; font-size: 40px; }
 .post h2 { font-size: 20px; line-height: 1.4; margin: 0 0 10px; }
 .post p { white-space: pre-wrap; line-height: 1.75; color: #dce2ef; margin: 0; }
+/* Hero link button on post cards (▶️ Watch on <Platform>) — mirrors the channel post's row-1 button. */
+.post-link-btn { display: block; margin-top: 12px; padding: 12px 16px; border-radius: 12px; background: linear-gradient(135deg,#2AABEE,#1c7fc0); color:#fff; font-weight:700; text-align:center; text-decoration:none; box-shadow:0 4px 14px rgba(42,171,238,.35); transition:transform .12s ease, box-shadow .12s ease; }
+.post-link-btn:active { transform: scale(.98); box-shadow:0 2px 8px rgba(42,171,238,.3); }
 .tags { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 14px; }
 .tags span { font-size: 12px; color: #a9b7d3; background: #1b2439; padding: 5px 8px; border-radius: 99px; }
 .meta { display: flex; justify-content: space-between; gap: 12px; color: #7f8ca6; font-size: 11px; margin-top: 15px; }
