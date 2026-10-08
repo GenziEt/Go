@@ -125,6 +125,10 @@ model Post {
   mediaAspect       String?
   altText           String?
   location          String?
+  // Optional official-platform link (YouTube/TikTok/Instagram/X/Facebook/LinkedIn) shown as
+  // the hero "▶️ Watch on …" button on the channel post and inside the Mini App detail view.
+  linkUrl           String?
+  linkPlatform      String?
   authorName        String
   readingMinutes    Int               @default(1)
   publishedAt       DateTime?
@@ -164,6 +168,9 @@ model Submission {
   category       String?
   tagsJson       String?
   location       String?
+  // Wizard step 4/5: optional official-platform link captured during post creation.
+  linkUrl        String?
+  linkPlatform   String?
   normalizedJson String?
   previewJson    String?
   moderationJson String?
