@@ -10,7 +10,7 @@ import { categories } from "./categories.js";
 import { t, type Locale } from "./i18n.js";
 import { getSession, setSession, clearSession, abandonOpenWork } from "./session-store.js";
 import { publishToChannel, deleteChannelMessage } from "./telegram-publisher.js";
-import { buildChannelCaption, buildChannelButtons, parsePlatformLink, invalidLinkMessage, attachChannelButtons } from "./post-buttons.js";
+import { buildChannelCaption, buildChannelButtons, parsePlatformLink, attachChannelButtons } from "./post-buttons.js";
 import { logger } from "./logger.js";
 
 /**
