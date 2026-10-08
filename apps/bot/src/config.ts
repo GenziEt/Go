@@ -9,6 +9,12 @@ const envSchema = z.object({
   TELEGRAM_OWNER_ID: z.string().min(1),
   TELEGRAM_BOT_USERNAME: z.string().optional(),
   GENZI_CHANNEL_ID: z.string().optional(),
+  // Public @handle of the GENZI channel (no @). Needed to build t.me/<handle>/<messageId>
+  // share links; when unset the 🔗 Share button is silently skipped on channel posts.
+  GENZI_CHANNEL_USERNAME: z.string().optional(),
+  // Full t.me/... link to the GENZI discussion group; when unset the 💬 Discuss button is
+  // silently skipped (graceful degradation, no crashes).
+  GENZI_DISCUSSION_URL: z.string().url().optional(),
   GENZI_GROUP_ID: z.string().optional(),
   WEBAPP_URL: z.string().default("http://localhost:5173"),
   CORS_ORIGINS: z.string().optional(),

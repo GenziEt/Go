@@ -2,7 +2,10 @@ import { db } from "./db.js";
 import type { Locale } from "./i18n.js";
 import type { Locale as PrismaLocale } from "@prisma/client";
 
-export type Step = "title" | "body" | "media" | "category" | "preview";
+export type Step = "title" | "body" | "media" | "link" | "category" | "preview";
+// Confirms the post wizard's /skip command (media + link steps) and nothing else — the
+// confession flow treats any "/..." as a pass-through command.
+export const POST_WIZARD_STEPS: readonly Step[] = ["title", "body", "media", "link", "category", "preview"] as const;
 export type ConfessionStep = "confession_body" | "confession_confirm";
 
 export function toPrismaLocale(locale: Locale): PrismaLocale {
