@@ -18,6 +18,7 @@ export interface LockedPost {
     category: string;
     location?: string;
     link?: string;
+    linkPlatform?: string;
   };
 }
 
@@ -37,7 +38,8 @@ export function lockPost(post: NormalizedPost, authorName: string): LockedPost {
       altText: post.altText,
       category: post.category,
       ...(post.location ? { location: post.location } : {}),
-      ...(post.link ? { link: post.link } : {})
+      ...(post.link ? { link: post.link } : {}),
+      ...(post.linkPlatform ? { linkPlatform: post.linkPlatform } : {})
     }
   };
 }

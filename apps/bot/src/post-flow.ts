@@ -10,6 +10,7 @@ import { categories } from "./categories.js";
 import { t, type Locale } from "./i18n.js";
 import { getSession, setSession, clearSession, abandonOpenWork } from "./session-store.js";
 import { publishToChannel, deleteChannelMessage } from "./telegram-publisher.js";
+import { buildChannelCaption, buildChannelButtons, parsePlatformLink, invalidLinkMessage, attachChannelButtons } from "./post-buttons.js";
 import { logger } from "./logger.js";
 
 /**
@@ -53,27 +54,65 @@ export async function getUser(ctx: Context) {
 
 type Normalized = ReturnType<typeof normalizePost>;
 
-// HTML preview (the old Markdown preview was rejected by Telegram whenever the user's text
-// contained _ * [ or `, leaving them with no preview). Body is clipped to fit the limit of the
-// message type that will carry it (1024 for a media caption, 4096 for text).
-function buildPreview(post: Normalized, locale: Locale, author: string, limit: number): string {
-  const tags = post.tags.length ? `\n\n🏷️ ${post.tags.map((x) => `#${x.replace(/\s+/g, "_")}`).join(" ")}` : "";
-  const reading = locale === "am" ? `${post.readingMinutes} ደቂቃ ንባብ` : `${post.readingMinutes} min read`;
-  const footer = `${tags}\n\n👤 ${author}\n📚 ${reading}`;
-  const room = Math.max(0, limit - post.title.length - footer.length - 40);
-  const body = post.body.length > room ? `${post.body.slice(0, room).trimEnd()}…` : post.body;
-  return `🇪🇹 GENZI\n\n<b>${escapeHtml(post.title)}</b>\n\n${escapeHtml(body)}${escapeHtml(footer)}`;
+// Preview context carried from the category step to sendPreview so the private preview shows
+// exactly what goes live (WYSIWYG): the premium caption with the dated footer AND the same
+// button rows the published channel post will carry (link hero + Read More/Share/Discuss).
+interface PreviewContext {
+  slug: string;
+  author: string;
+  linkUrl?: string | null;
+  linkPlatform?: string | null;
 }
 
-async function sendPreview(ctx: Context, post: Normalized, locale: Locale, author: string): Promise<void> {
-  const keyboard = previewKeyboard(locale);
+// HTML preview (the old Markdown preview was rejected by Telegram whenever the user's text
+// contained _ * [ or `, leaving them with no preview). The body is clipped so the FULL premium
+// caption (header + tags/location + "👤 Author · 📅 date" footer) fits the limit of the message
+// type that will carry it (1024 for a media caption, 4096 for text).
+function buildPreview(post: Normalized, locale: Locale, ctxInfo: PreviewContext, limit: number): string {
+  const render = (body: string) => buildChannelCaption({
+    title: post.title,
+    body,
+    tags: post.tags,
+    author: ctxInfo.author,
+    readingMinutes: post.readingMinutes,
+    publishedAt: new Date(),
+    ...(post.location ? { location: post.location } : {}),
+    escapeHtml,
+  });
+  let caption = render(post.body);
+  if (caption.length > limit) {
+    // Trim the body until the whole formatted caption (footer included) fits.
+    const room = Math.max(0, post.body.length - (caption.length - limit) - 8);
+    caption = render(post.body.slice(0, room).trimEnd() + "…");
+  }
+  return caption;
+}
+
+async function sendPreview(ctx: Context, post: Normalized, locale: Locale, ctxInfo: PreviewContext): Promise<void> {
+  // Channel-style buttons under the preview (messageId: null — Share falls back to the Mini App
+  // deep link until the real channel message id exists after publishing).
+  const channelButtons = buildChannelButtons({
+    slug: ctxInfo.slug,
+    messageId: null,
+    chatId: null,
+    linkUrl: ctxInfo.linkUrl ?? null,
+    linkPlatform: ctxInfo.linkPlatform ?? null,
+    locale,
+  });
+  const keyboard = channelButtons
+    ? InlineKeyboard.from(channelButtons.build())
+        .text(t(locale, "approve"), "publish_preview").row()
+        .text(t(locale, "edit"), "edit_preview")
+        .text(t(locale, "saveDraft"), "save_draft").row()
+        .text(t(locale, "cancel"), "cancel")
+    : previewKeyboard(locale);
   try {
     if (post.mediaType === "image" && post.mediaFileId) {
-      await ctx.replyWithPhoto(post.mediaFileId, { caption: buildPreview(post, locale, author, 1000), parse_mode: "HTML", reply_markup: keyboard });
+      await ctx.replyWithPhoto(post.mediaFileId, { caption: buildPreview(post, locale, ctxInfo, 1000), parse_mode: "HTML", reply_markup: keyboard });
     } else if (post.mediaType === "video" && post.mediaFileId) {
-      await ctx.replyWithVideo(post.mediaFileId, { caption: buildPreview(post, locale, author, 1000), parse_mode: "HTML", reply_markup: keyboard });
+      await ctx.replyWithVideo(post.mediaFileId, { caption: buildPreview(post, locale, ctxInfo, 1000), parse_mode: "HTML", reply_markup: keyboard });
     } else {
-      await ctx.reply(buildPreview(post, locale, author, 3800), { parse_mode: "HTML", reply_markup: keyboard });
+      await ctx.reply(buildPreview(post, locale, ctxInfo, 3800), { parse_mode: "HTML", reply_markup: keyboard });
     }
   } catch (error) {
     logger.warn("post preview send failed, falling back to plain text", { error: String(error) });
@@ -146,7 +185,13 @@ export function registerPostFlow(bot: Bot): void {
     await db.submission.update({ where: { id: draft.id }, data: { state: "PREVIEW" } });
     await setSession(ctx.from.id, draft.id, "preview", locale);
     await ctx.answerCallbackQuery();
-    await sendPreview(ctx, JSON.parse(draft.normalizedJson) as Normalized, locale, user.firstName ?? "GENZI");
+    const normalized = JSON.parse(draft.normalizedJson) as Normalized;
+    await sendPreview(ctx, normalized, locale, {
+      slug: normalized.slug,
+      author: user.firstName ?? "GENZI",
+      linkUrl: draft.linkUrl,
+      linkPlatform: draft.linkPlatform,
+    });
   });
 
   bot.callbackQuery(/^cat:(.+)$/, async (ctx) => {
@@ -172,6 +217,8 @@ export function registerPostFlow(bot: Bot): void {
       body: submission.body,
       category: key,
       tags: extractTags(submission.body),
+      ...(submission.linkUrl ? { link: submission.linkUrl } : {}),
+      ...(submission.linkPlatform ? { linkPlatform: submission.linkPlatform } : {}),
       ...(submission.mediaType ? { mediaType: submission.mediaType } : {}),
       ...(submission.mediaFileId ? { mediaFileId: submission.mediaFileId } : {}),
     });
@@ -195,7 +242,12 @@ export function registerPostFlow(bot: Bot): void {
     }
     await db.submission.update({ where: { id: submission.id }, data: { ...common, state: "PREVIEW" } });
     await setSession(ctx.from.id, submission.id, "preview", locale);
-    await sendPreview(ctx, normalized, locale, user.firstName ?? "GENZI");
+    await sendPreview(ctx, normalized, locale, {
+      slug: normalized.slug,
+      author: user.firstName ?? "GENZI",
+      linkUrl: submission.linkUrl,
+      linkPlatform: submission.linkPlatform,
+    });
   });
 
   bot.callbackQuery("publish_preview", async (ctx) => {
@@ -225,6 +277,8 @@ export function registerPostFlow(bot: Bot): void {
     }
     const author = user.firstName ?? "GENZI";
     const locked = lockPost(normalized, author);
+    const linkUrl = submission.linkUrl ?? locked.metadata.link ?? null;
+    const linkPlatform = submission.linkPlatform ?? locked.metadata.linkPlatform ?? null;
     let telegramPublication: { chatId: string; messageId: number };
     try {
       telegramPublication = await publishToChannel(bot, {
@@ -235,6 +289,7 @@ export function registerPostFlow(bot: Bot): void {
         ...(locked.media.type ? { mediaType: locked.media.type } : {}),
         ...(locked.media.fileId ? { mediaFileId: locked.media.fileId } : {}),
         ...(locked.metadata.location ? { location: locked.metadata.location } : {}),
+        readingMinutes: locked.metadata.readingMinutes,
       });
     } catch (error) {
       logger.error("GENZI channel publication failed", { error: String(error) });
@@ -256,6 +311,8 @@ export function registerPostFlow(bot: Bot): void {
           ...(locked.media.aspectRatio !== undefined ? { mediaAspect: locked.media.aspectRatio } : {}),
           ...(locked.metadata.altText !== undefined ? { altText: locked.metadata.altText } : {}),
           ...(locked.metadata.location !== undefined ? { location: locked.metadata.location } : {}),
+          linkUrl,
+          linkPlatform,
           readingMinutes: locked.metadata.readingMinutes,
           publishedAt: new Date(),
           telegramMessageId: telegramPublication.messageId,
@@ -271,6 +328,16 @@ export function registerPostFlow(bot: Bot): void {
       await revert();
       return ctx.answerCallbackQuery(t(locale, "publishFailed"));
     }
+    // Buttons are attached AFTER the Post row exists: the Share button needs the real channel
+    // message id and Read More needs the final slug. Best-effort — never fails the publish.
+    await attachChannelButtons(bot, telegramPublication.chatId, telegramPublication.messageId, {
+      slug: post.slug,
+      messageId: telegramPublication.messageId,
+      chatId: telegramPublication.chatId,
+      linkUrl,
+      linkPlatform,
+      locale,
+    });
     await db.submission.update({ where: { id: submissionId }, data: { state: "PUBLISHED" } });
     await clearSession(ctx.from.id);
     await ctx.answerCallbackQuery();
@@ -306,9 +373,11 @@ export function registerPostFlow(bot: Bot): void {
     if (!session || !submissionId || session.step !== "preview")
       return ctx.answerCallbackQuery(t(locale, "sessionExpired"));
     // Back to INPUT so an old preview's Publish button can't publish stale content mid-edit.
+    // The link fields are cleared too — re-running the wizard must not silently reuse a stale
+    // link (the Link step is optional, /skip resets it to null).
     const reopened = await db.submission.updateMany({
       where: { id: submissionId, userId: user.id, state: "PREVIEW" },
-      data: { state: "INPUT", mediaType: null, mediaFileId: null },
+      data: { state: "INPUT", mediaType: null, mediaFileId: null, linkUrl: null, linkPlatform: null },
     });
     if (reopened.count === 0) return ctx.answerCallbackQuery(t(locale, "notReady"));
     await setSession(ctx.from.id, submissionId, "title", locale);
@@ -337,12 +406,12 @@ export function registerPostFlow(bot: Bot): void {
     const session = await getSession(ctx.from.id);
     const submissionId = session?.submissionId;
     if (!session || !submissionId) return next();
-    if (session.step !== "title" && session.step !== "body" && session.step !== "media") return next();
+    if (session.step !== "title" && session.step !== "body" && session.step !== "media" && session.step !== "link") return next();
 
     const text = ctx.message.text ?? ctx.message.caption ?? "";
     // Commands (/help, /language ...) pass through to their handlers instead of being saved as
-    // the title/body. /skip is the one command this wizard owns.
-    if (text.startsWith("/") && !(session.step === "media" && text === "/skip")) return next();
+    // the title/body. /skip is the one command this wizard owns (media + link steps).
+    if (text.startsWith("/") && !((session.step === "media" || session.step === "link") && text === "/skip")) return next();
 
     const user = await getUser(ctx);
     const locale = session.locale === "ENGLISH" ? "en" : "am";
@@ -396,12 +465,12 @@ export function registerPostFlow(bot: Bot): void {
     }
 
     // step === "media"
-    const askCategory = async () => {
-      await setSession(ctx.from!.id, submissionId, "category", locale);
-      await ctx.reply(t(locale, "categoryPrompt"), { reply_markup: categoryKeyboard(locale) });
+    const askLink = async () => {
+      await setSession(ctx.from!.id, submissionId, "link", locale);
+      await ctx.reply(t(locale, "linkPrompt"));
     };
     if (text === "/skip") {
-      await askCategory();
+      await askLink();
       return;
     }
     const photo = ctx.message.photo?.at(-1);
@@ -413,9 +482,46 @@ export function registerPostFlow(bot: Bot): void {
         where: { id: submission.id },
         data: photo ? { mediaType: "image", mediaFileId: photo.file_id } : { mediaType: "video", mediaFileId: video!.file_id },
       });
-      await askCategory();
+      await askLink();
       return;
     }
     await ctx.reply(t(locale, "mediaInvalid"));
+    return;
+  }
+
+  // step === "link" — optional official-platform link (YouTube/TikTok/Instagram/X/Facebook/LinkedIn).
+  if (session.step === "link") {
+    const askCategory = async () => {
+      await setSession(ctx.from!.id, submissionId, "category", locale);
+      await ctx.reply(t(locale, "categoryPrompt"), { reply_markup: categoryKeyboard(locale) });
+    };
+    if (text === "/skip") {
+      // Reset any stale link from a previous pass through the wizard.
+      await db.submission.update({ where: { id: submission.id }, data: { linkUrl: null, linkPlatform: null } });
+      await askCategory();
+      return;
+    }
+    const parsed = parsePlatformLink(text);
+    if (!parsed) {
+      await ctx.reply(t(locale, "linkInvalid"));
+      return;
+    }
+    // Defense in depth: run the normal text moderation on the raw URL string so scam keywords
+    // embedded inside the path/query ("...pay-first-to-claim") are caught even though the host
+    // is allowlisted. The platform allowlist above already restricts destinations to the six
+    // official apps (subset of LINK_ALLOW_HOSTS in moderation.ts).
+    const urlCheck = moderateText(parsed.url, { isAdmin: staff, isForwarded: false });
+    if (urlCheck.decision === "BAN" || urlCheck.decision === "REJECT") {
+      await moderateAndEnforce(user.id, staff, [parsed.url]);
+      await ctx.reply(urlCheck.category === "LINK" ? t(locale, "linkDenied") : t(locale, "rejected"));
+      return;
+    }
+    if (urlCheck.decision === "QUARANTINE") {
+      await ctx.reply(t(locale, "linkInvalid"));
+      return;
+    }
+    await db.submission.update({ where: { id: submission.id }, data: { linkUrl: parsed.url, linkPlatform: parsed.platform } });
+    await askCategory();
+  }
   });
 }

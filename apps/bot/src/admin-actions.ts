@@ -3,6 +3,7 @@ import type { User } from "@prisma/client";
 import { db } from "./db.js";
 import { publishToChannel } from "./telegram-publisher.js";
 import { lockPost } from "./post-schema.js";
+import { attachChannelButtons } from "./post-buttons.js";
 import { env } from "./config.js";
 
 export type AdminDecision = "APPROVE" | "REJECT" | "BAN" | "RESTRICT";
@@ -53,14 +54,25 @@ export async function performModerationAction(bot: Bot, submissionId: string, mo
           tags: parseTags(hidden.tagsJson),
           author: hidden.authorName ?? authorName,
           ...(hidden.mediaType && hidden.mediaFileId ? { mediaType: hidden.mediaType, mediaFileId: hidden.mediaFileId } : {}),
-          ...(hidden.location ? { location: hidden.location } : {})
+          ...(hidden.location ? { location: hidden.location } : {}),
+          readingMinutes: hidden.readingMinutes
         });
         post = await db.post.update({
           where: { id: hidden.id },
           data: { visibility: "PUBLIC", publishedAt: new Date(), telegramMessageId: publication.messageId, telegramChatId: publication.chatId }
         });
+        // Same premium button rows as the wizard path (link hero + Read More/Share/Discuss).
+        await attachChannelButtons(bot, publication.chatId, publication.messageId, {
+          slug: post.slug,
+          messageId: publication.messageId,
+          chatId: publication.chatId,
+          linkUrl: post.linkUrl,
+          linkPlatform: post.linkPlatform
+        });
       } else {
         const locked = lockPost(normalized, authorName);
+        const linkUrl = submission.linkUrl ?? locked.metadata.link ?? null;
+        const linkPlatform = submission.linkPlatform ?? locked.metadata.linkPlatform ?? null;
         const publication = await publishToChannel(bot, {
           title: locked.title,
           body: locked.body,
@@ -68,7 +80,8 @@ export async function performModerationAction(bot: Bot, submissionId: string, mo
           author: authorName,
           ...(locked.media.type ? { mediaType: locked.media.type } : {}),
           ...(locked.media.fileId ? { mediaFileId: locked.media.fileId } : {}),
-          ...(locked.metadata.location ? { location: locked.metadata.location } : {})
+          ...(locked.metadata.location ? { location: locked.metadata.location } : {}),
+          readingMinutes: locked.metadata.readingMinutes
         });
         post = await db.post.create({
           data: {
@@ -83,6 +96,8 @@ export async function performModerationAction(bot: Bot, submissionId: string, mo
             mediaAspect: locked.media.aspectRatio ?? null,
             altText: locked.metadata.altText ?? null,
             location: locked.metadata.location ?? null,
+            linkUrl,
+            linkPlatform,
             readingMinutes: locked.metadata.readingMinutes,
             publishedAt: new Date(),
             telegramMessageId: publication.messageId,
@@ -90,6 +105,13 @@ export async function performModerationAction(bot: Bot, submissionId: string, mo
             authorId: submission.userId,
             authorName
           }
+        });
+        await attachChannelButtons(bot, publication.chatId, publication.messageId, {
+          slug: post.slug,
+          messageId: publication.messageId,
+          chatId: publication.chatId,
+          linkUrl,
+          linkPlatform
         });
       }
       await db.submission.update({ where: { id: submissionId }, data: { state: "PUBLISHED" } });

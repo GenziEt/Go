@@ -5,6 +5,10 @@ export interface RawPost {
   tags: string[];
   location?: string;
   link?: string;
+  // Platform of `link` ("youtube" | "tiktok" | "instagram" | "x" | "facebook" | "linkedin"),
+  // captured by the wizard's Link step. Carried through LockedPost.metadata so the publisher
+  // can build the "▶️ Watch on <Platform>" hero button label.
+  linkPlatform?: string;
   mediaType?: string;
   mediaFileId?: string;
 }
