@@ -90,7 +90,9 @@ function buildPreview(post: Normalized, locale: Locale, ctxInfo: PreviewContext,
 
 async function sendPreview(ctx: Context, post: Normalized, locale: Locale, ctxInfo: PreviewContext): Promise<void> {
   // Channel-style buttons under the preview (messageId: null — Share falls back to the Mini App
-  // deep link until the real channel message id exists after publishing).
+  // deep link until the real channel message id exists after publishing). The approval actions
+  // are callback buttons, so they live on their own rows BELOW the URL-type channel rows
+  // (never mixed in the same row).
   const channelButtons = buildChannelButtons({
     slug: ctxInfo.slug,
     messageId: null,
@@ -100,7 +102,7 @@ async function sendPreview(ctx: Context, post: Normalized, locale: Locale, ctxIn
     locale,
   });
   const keyboard = channelButtons
-    ? InlineKeyboard.from(channelButtons.build())
+    ? channelButtons
         .text(t(locale, "approve"), "publish_preview").row()
         .text(t(locale, "edit"), "edit_preview")
         .text(t(locale, "saveDraft"), "save_draft").row()
@@ -406,7 +408,7 @@ export function registerPostFlow(bot: Bot): void {
     const session = await getSession(ctx.from.id);
     const submissionId = session?.submissionId;
     if (!session || !submissionId) return next();
-    if (session.step !== "title" && session.step !== "body" && session.step !== "media" && session.step !== "link") return next();
+    if (session.step !== "title" && session.step !== "body" && session.step !== "media" && session.step !== "link" && session.step !== "category") return next();
 
     const text = ctx.message.text ?? ctx.message.caption ?? "";
     // Commands (/help, /language ...) pass through to their handlers instead of being saved as
@@ -465,63 +467,114 @@ export function registerPostFlow(bot: Bot): void {
     }
 
     // step === "media"
-    const askLink = async () => {
-      await setSession(ctx.from!.id, submissionId, "link", locale);
-      await ctx.reply(t(locale, "linkPrompt"));
-    };
-    if (text === "/skip") {
-      await askLink();
+    if (session.step === "media") {
+      const askLink = async () => {
+        await setSession(ctx.from!.id, submissionId, "link", locale);
+        await ctx.reply(t(locale, "linkPrompt"));
+      };
+      if (text === "/skip") {
+        await askLink();
+        return;
+      }
+      const photo = ctx.message.photo?.at(-1);
+      const video = ctx.message.video;
+      if (photo || video) {
+        // Captions are not published, but they are still user text: check them.
+        if (text && (await hardReject(text))) return;
+        await db.submission.update({
+          where: { id: submission.id },
+          data: photo ? { mediaType: "image", mediaFileId: photo.file_id } : { mediaType: "video", mediaFileId: video!.file_id },
+        });
+        await askLink();
+        return;
+      }
+      await ctx.reply(t(locale, "mediaInvalid"));
       return;
     }
-    const photo = ctx.message.photo?.at(-1);
-    const video = ctx.message.video;
-    if (photo || video) {
-      // Captions are not published, but they are still user text: check them.
-      if (text && (await hardReject(text))) return;
-      await db.submission.update({
-        where: { id: submission.id },
-        data: photo ? { mediaType: "image", mediaFileId: photo.file_id } : { mediaType: "video", mediaFileId: video!.file_id },
-      });
-      await askLink();
-      return;
-    }
-    await ctx.reply(t(locale, "mediaInvalid"));
-    return;
-  }
 
-  // step === "link" — optional official-platform link (YouTube/TikTok/Instagram/X/Facebook/LinkedIn).
-  if (session.step === "link") {
-    const askCategory = async () => {
-      await setSession(ctx.from!.id, submissionId, "category", locale);
-      await ctx.reply(t(locale, "categoryPrompt"), { reply_markup: categoryKeyboard(locale) });
-    };
-    if (text === "/skip") {
-      // Reset any stale link from a previous pass through the wizard.
-      await db.submission.update({ where: { id: submission.id }, data: { linkUrl: null, linkPlatform: null } });
+    // step === "link" — optional official-platform link (YouTube/TikTok/Instagram/X/Facebook/LinkedIn).
+    if (session.step === "link") {
+      const askCategory = async () => {
+        await setSession(ctx.from!.id, submissionId, "category", locale);
+        await ctx.reply(t(locale, "categoryPrompt"), { reply_markup: categoryKeyboard(locale) });
+      };
+      if (text === "/skip") {
+        // Reset any stale link from a previous pass through the wizard.
+        await db.submission.update({ where: { id: submission.id }, data: { linkUrl: null, linkPlatform: null } });
+        await askCategory();
+        return;
+      }
+      const parsed = parsePlatformLink(text);
+      if (!parsed) {
+        await ctx.reply(t(locale, "linkInvalid"));
+        return;
+      }
+      // Defense in depth: run the normal text moderation on the raw URL string so scam keywords
+      // embedded inside the path/query ("...pay-first-to-claim") are caught even though the host
+      // is allowlisted. The platform allowlist above already restricts destinations to the six
+      // official apps (subset of LINK_ALLOW_HOSTS in moderation.ts).
+      const urlCheck = moderateText(parsed.url, { isAdmin: staff, isForwarded: false });
+      if (urlCheck.decision === "BAN" || urlCheck.decision === "REJECT") {
+        await moderateAndEnforce(user.id, staff, [parsed.url]);
+        await ctx.reply(urlCheck.category === "LINK" ? t(locale, "linkDenied") : t(locale, "rejected"));
+        return;
+      }
+      if (urlCheck.decision === "QUARANTINE") {
+        await ctx.reply(t(locale, "linkInvalid"));
+        return;
+      }
+      await db.submission.update({ where: { id: submission.id }, data: { linkUrl: parsed.url, linkPlatform: parsed.platform } });
       await askCategory();
       return;
     }
-    const parsed = parsePlatformLink(text);
-    if (!parsed) {
-      await ctx.reply(t(locale, "linkInvalid"));
+
+    // step === "category" — free text here is a category search (the buttons are handled by the
+    // cat: callback). Matching exactly one category advances straight to the preview.
+    if (session.step === "category") {
+      const askCategoryAgain = async () => {
+        await ctx.reply(t(locale, "categoryPrompt"), { reply_markup: categoryKeyboard(locale) });
+      };
+      const query = text.toLowerCase().trim();
+      if (!query) return;
+      const matches = categories.filter((c) => c.am.toLowerCase().includes(query) || c.en.toLowerCase().includes(query));
+      if (matches.length === 1) {
+        const normalized = normalizePost({
+          title: submission.title ?? "",
+          body: submission.body ?? "",
+          category: matches[0]!.key,
+          tags: extractTags(submission.body ?? ""),
+          ...(submission.linkUrl ? { link: submission.linkUrl } : {}),
+          ...(submission.linkPlatform ? { linkPlatform: submission.linkPlatform } : {}),
+          ...(submission.mediaType ? { mediaType: submission.mediaType } : {}),
+          ...(submission.mediaFileId ? { mediaFileId: submission.mediaFileId } : {}),
+        });
+        const moderation = await moderateAndEnforce(user.id, staff, [normalized.title, normalized.body]);
+        const common = { category: matches[0]!.key, normalizedJson: JSON.stringify(normalized), moderationJson: JSON.stringify(moderation) };
+        if (moderation.decision === "BAN" || moderation.decision === "REJECT") {
+          await db.submission.update({ where: { id: submission.id }, data: { ...common, state: "REJECTED" } });
+          await clearSession(ctx.from.id);
+          await ctx.reply(moderation.category === "LINK" ? t(locale, "linkDenied") : t(locale, "rejected"));
+          return;
+        }
+        if (moderation.decision === "QUARANTINE") {
+          await db.submission.update({ where: { id: submission.id }, data: { ...common, state: "QUARANTINED" } });
+          await clearSession(ctx.from.id);
+          await ctx.reply(t(locale, "quarantined"));
+          return;
+        }
+        await db.submission.update({ where: { id: submission.id }, data: { ...common, state: "PREVIEW" } });
+        await setSession(ctx.from.id, submission.id, "preview", locale);
+        await sendPreview(ctx, normalized, locale, {
+          slug: normalized.slug,
+          author: user.firstName ?? "GENZI",
+          linkUrl: submission.linkUrl,
+          linkPlatform: submission.linkPlatform,
+        });
+        return;
+      }
+      // Zero or several matches: show the keyboard again so the user can tap the right button.
+      await askCategoryAgain();
       return;
     }
-    // Defense in depth: run the normal text moderation on the raw URL string so scam keywords
-    // embedded inside the path/query ("...pay-first-to-claim") are caught even though the host
-    // is allowlisted. The platform allowlist above already restricts destinations to the six
-    // official apps (subset of LINK_ALLOW_HOSTS in moderation.ts).
-    const urlCheck = moderateText(parsed.url, { isAdmin: staff, isForwarded: false });
-    if (urlCheck.decision === "BAN" || urlCheck.decision === "REJECT") {
-      await moderateAndEnforce(user.id, staff, [parsed.url]);
-      await ctx.reply(urlCheck.category === "LINK" ? t(locale, "linkDenied") : t(locale, "rejected"));
-      return;
-    }
-    if (urlCheck.decision === "QUARANTINE") {
-      await ctx.reply(t(locale, "linkInvalid"));
-      return;
-    }
-    await db.submission.update({ where: { id: submission.id }, data: { linkUrl: parsed.url, linkPlatform: parsed.platform } });
-    await askCategory();
-  }
   });
 }
