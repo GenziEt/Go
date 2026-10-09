@@ -13,8 +13,8 @@
 // every button, no mixing of interactive and link buttons in one row, predictable positions
 // (Read More is always the first slot of its row), and the keyboard never collapses to a
 // single lonely button when there is no link — Read More + Share keep row 2 balanced.
-import type { Bot, InlineKeyboard } from "grammy";
-import { InlineKeyboard as Keyboard } from "grammy";
+import type { Bot } from "grammy";
+import { InlineKeyboard } from "grammy";
 import { env } from "./config.js";
 import { logger } from "./logger.js";
 import type { Locale } from "./i18n.js";
@@ -151,7 +151,7 @@ export interface PostButtonContext {
 // All buttons are URL-type — no callback spinning loaders on channel posts.
 export function buildChannelButtons(ctx: PostButtonContext): InlineKeyboard | null {
   const locale: Locale = ctx.locale ?? "en";
-  const kb = new Keyboard();
+  const kb = new InlineKeyboard();
   let rows = 0;
 
   // Row 1 (hero, optional): the platform link, alone and full-width.
@@ -165,10 +165,14 @@ export function buildChannelButtons(ctx: PostButtonContext): InlineKeyboard | nu
   }
 
   // Row 2 (constant): Read More + Share, paired. Each degrades gracefully.
-  const pair = new Keyboard();
+  // Buttons are appended to the current row via kb.text(); kb.row() then flushes it.
+  // Never pass a nested InlineKeyboard to kb.row() — the API expects buttons, not keyboards.
   let pairCount = 0;
   if (env.TELEGRAM_BOT_USERNAME) {
-    pair.text(locale === "am" ? "📖 ሙሉውን ያንብቡ" : "📖 Read More", `${env.WEBAPP_URL}?startapp=post_${ctx.slug}`);
+    kb.text(
+      locale === "am" ? "📖 ሙሉውን ያንብቡ" : "📖 Read More",
+      `${env.WEBAPP_URL}?startapp=post_${ctx.slug}`,
+    );
     pairCount++;
   } else {
     logger.warn("TELEGRAM_BOT_USERNAME unset — Read More button skipped on channel posts");
@@ -180,11 +184,11 @@ export function buildChannelButtons(ctx: PostButtonContext): InlineKeyboard | nu
       ctx.messageId !== null
         ? `https://t.me/${env.GENZI_CHANNEL_USERNAME}/${ctx.messageId}`
         : `${env.WEBAPP_URL}?startapp=post_${ctx.slug}`;
-    pair.text(locale === "am" ? "🔗 ያጋሩ" : "🔗 Share", shareUrl(postUrl));
+    kb.text(locale === "am" ? "🔗 ያጋሩ" : "🔗 Share", shareUrl(postUrl));
     pairCount++;
   }
   if (pairCount > 0) {
-    kb.row(pair);
+    kb.row();
     rows++;
   }
 
